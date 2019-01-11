@@ -26,6 +26,7 @@ import {
   hookResetter,
   textCursor,
   attributeCursor,
+  documentDimension,
 } from '../types';
 import { deepDelete, isParentRemoved, isParentDropped } from './collection';
 
@@ -48,6 +49,7 @@ import { deepDelete, isParentRemoved, isParentDropped } from './collection';
  */
 function initMutationObserver(
   cb: mutationCallBack,
+  doc: Document,
   blockClass: string,
 ): MutationObserver {
   const observer = new MutationObserver(mutations => {
@@ -157,7 +159,10 @@ function initMutationObserver(
           nextId: !n.nextSibling
             ? n.nextSibling
             : mirror.getId(n.nextSibling as INode),
-          node: serializeNodeWithId(n, document, mirror.map, blockClass, true)!,
+          node: serializeNodeWithId(n, doc, mirror.map, {
+            blockClass,
+            skipChild: true,
+          })!,
         });
       } else {
         droppedSet.add(n);
@@ -193,7 +198,7 @@ function initMutationObserver(
     }
     cb(payload);
   });
-  observer.observe(document, {
+  observer.observe(doc, {
     attributes: true,
     attributeOldValue: true,
     characterData: true,
@@ -204,7 +209,11 @@ function initMutationObserver(
   return observer;
 }
 
-function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
+function initMousemoveObserver(
+  cb: mousemoveCallBack,
+  doc: Document,
+  dimension: documentDimension,
+): listenerHandler {
   let positions: mousePosition[] = [];
   let timeBaseline: number | null;
   const wrappedCb = throttle(() => {
@@ -225,8 +234,8 @@ function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
         timeBaseline = Date.now();
       }
       positions.push({
-        x: clientX,
-        y: clientY,
+        x: dimension.x + clientX,
+        y: dimension.y + clientY,
         id: mirror.getId(target as INode),
         timeOffset: Date.now() - timeBaseline,
       });
@@ -237,11 +246,13 @@ function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
       trailing: false,
     },
   );
-  return on('mousemove', updatePosition);
+  return on('mousemove', updatePosition, doc);
 }
 
 function initMouseInteractionObserver(
   cb: mouseInteractionCallBack,
+  doc: Document,
+  dimension: documentDimension,
   blockClass: string,
 ): listenerHandler {
   const handlers: listenerHandler[] = [];
@@ -255,8 +266,8 @@ function initMouseInteractionObserver(
       cb({
         type: MouseInteractions[eventKey],
         id,
-        x: clientX,
-        y: clientY,
+        x: dimension.x + clientX,
+        y: dimension.y + clientY,
       });
     };
   };
@@ -265,7 +276,7 @@ function initMouseInteractionObserver(
     .forEach((eventKey: keyof typeof MouseInteractions) => {
       const eventName = eventKey.toLowerCase();
       const handler = getHandler(eventKey);
-      handlers.push(on(eventName, handler));
+      handlers.push(on(eventName, handler, doc));
     });
   return () => {
     handlers.forEach(h => h());
@@ -274,6 +285,7 @@ function initMouseInteractionObserver(
 
 function initScrollObserver(
   cb: scrollCallback,
+  doc: Document,
   blockClass: string,
 ): listenerHandler {
   const updatePosition = throttle<UIEvent>(evt => {
@@ -281,8 +293,8 @@ function initScrollObserver(
       return;
     }
     const id = mirror.getId(evt.target as INode);
-    if (evt.target === document) {
-      const scrollEl = (document.scrollingElement || document.documentElement)!;
+    if (evt.target === doc) {
+      const scrollEl = (doc.scrollingElement || doc.documentElement)!;
       cb({
         id,
         x: scrollEl.scrollLeft,
@@ -296,7 +308,7 @@ function initScrollObserver(
       });
     }
   }, 100);
-  return on('scroll', updatePosition);
+  return on('scroll', updatePosition, doc);
 }
 
 function initViewportResizeObserver(
@@ -317,6 +329,7 @@ const INPUT_TAGS = ['INPUT', 'TEXTAREA', 'SELECT'];
 const lastInputValueMap: WeakMap<EventTarget, inputValue> = new WeakMap();
 function initInputObserver(
   cb: inputCallback,
+  doc: Document,
   blockClass: string,
   ignoreClass: string,
 ): listenerHandler {
@@ -347,7 +360,7 @@ function initInputObserver(
     // the other radios with the same name attribute will be unchecked.
     const name: string | undefined = (target as HTMLInputElement).name;
     if (type === 'radio' && name && isChecked) {
-      document
+      doc
         .querySelectorAll(`input[type="radio"][name="${name}"]`)
         .forEach(el => {
           if (el !== target) {
@@ -377,7 +390,7 @@ function initInputObserver(
   const handlers: Array<listenerHandler | hookResetter> = [
     'input',
     'change',
-  ].map(eventName => on(eventName, eventHandler));
+  ].map(eventName => on(eventName, eventHandler, doc));
   const propertyDescriptor = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
     'value',
@@ -406,19 +419,28 @@ function initInputObserver(
 }
 
 export default function initObservers(o: observerParam): listenerHandler {
-  const mutationObserver = initMutationObserver(o.mutationCb, o.blockClass);
-  const mousemoveHandler = initMousemoveObserver(o.mousemoveCb);
+  const {
+    mutationCb,
+    mousemoveCb,
+    mouseInteractionCb,
+    inputCb,
+    scrollCb,
+    doc,
+    blockClass,
+    ignoreClass,
+    dimension,
+  } = o;
+  const mutationObserver = initMutationObserver(mutationCb, doc, blockClass);
+  const mousemoveHandler = initMousemoveObserver(mousemoveCb, doc, dimension);
   const mouseInteractionHandler = initMouseInteractionObserver(
-    o.mouseInteractionCb,
-    o.blockClass,
+    mouseInteractionCb,
+    doc,
+    dimension,
+    blockClass,
   );
-  const scrollHandler = initScrollObserver(o.scrollCb, o.blockClass);
+  const scrollHandler = initScrollObserver(scrollCb, doc, blockClass);
   const viewportResizeHandler = initViewportResizeObserver(o.viewportResizeCb);
-  const inputHandler = initInputObserver(
-    o.inputCb,
-    o.blockClass,
-    o.ignoreClass,
-  );
+  const inputHandler = initInputObserver(inputCb, doc, blockClass, ignoreClass);
   return () => {
     mutationObserver.disconnect();
     mousemoveHandler();
