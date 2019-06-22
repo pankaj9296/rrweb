@@ -18,6 +18,8 @@ import {
   incrementalSnapshotEvent,
   incrementalData,
   ReplayerEvents,
+  Handler,
+  Emitter,
 } from '../types';
 import { mirror } from '../utils';
 import getInjectStyleRules from './styles/inject-style';
@@ -43,7 +45,7 @@ export class Replayer {
 
   private mouse: HTMLDivElement;
 
-  private emitter: mitt.Emitter = mitt();
+  private emitter: Emitter = mitt();
 
   private baselineTime: number = 0;
   // record last played event timestamp when paused
@@ -69,16 +71,17 @@ export class Replayer {
       showWarning: true,
       showDebug: false,
       blockClass: 'rr-block',
+      liveMode: false,
     };
     this.config = Object.assign({}, defaultConfig, config);
 
     this.timer = new Timer(this.config);
     smoothscroll.polyfill();
     this.setupDom();
-    this.emitter.on('resize', this.handleResize as mitt.Handler);
+    this.emitter.on('resize', this.handleResize as Handler);
   }
 
-  public on(event: string, handler: mitt.Handler) {
+  public on(event: string, handler: Handler) {
     this.emitter.on(event, handler);
   }
 
@@ -155,6 +158,11 @@ export class Replayer {
     this.timer.addActions(actions);
     this.timer.start();
     this.emitter.emit(ReplayerEvents.Resume);
+  }
+
+  public addEvent(event: eventWithTime) {
+    const castFn = this.getCastFn(event, true);
+    castFn();
   }
 
   private setupDom() {
@@ -347,17 +355,19 @@ export class Replayer {
         });
 
         const missingNodeMap: missingNodeMap = { ...this.missingNodeRetryMap };
-        d.adds.forEach(mutation => {
+        const queue: addedNodeMutation[] = [];
+
+        const appendNode = (mutation: addedNodeMutation) => {
+          const parent = mirror.getNode(mutation.parentId);
+          if (!parent) {
+            return queue.push(mutation);
+          }
           const target = buildNodeWithSN(
             mutation.node,
             this.iframe.contentDocument!,
             mirror.map,
             true,
           ) as Node;
-          const parent = mirror.getNode(mutation.parentId);
-          if (!parent) {
-            return this.warnNodeNotFound(d, mutation.parentId);
-          }
           let previous: Node | null = null;
           let next: Node | null = null;
           if (mutation.previousId) {
@@ -390,7 +400,20 @@ export class Replayer {
           if (mutation.previousId || mutation.nextId) {
             this.resolveMissingNode(missingNodeMap, parent, target, mutation);
           }
+        };
+
+        d.adds.forEach(mutation => {
+          appendNode(mutation);
         });
+
+        while (queue.length) {
+          if (queue.every(m => !Boolean(mirror.getNode(m.parentId)))) {
+            return queue.forEach(m => this.warnNodeNotFound(d, m.node.id));
+          }
+          const mutation = queue.shift()!;
+          appendNode(mutation);
+        }
+
         if (Object.keys(missingNodeMap).length) {
           Object.assign(this.missingNodeRetryMap, missingNodeMap);
         }
@@ -424,8 +447,10 @@ export class Replayer {
         break;
       }
       case IncrementalSource.MouseMove:
-        // skip mouse move in sync mode
-        if (!isSync) {
+        if (isSync) {
+          const lastPosition = d.positions[d.positions.length - 1];
+          this.moveAndHover(d, lastPosition.x, lastPosition.y, lastPosition.id);
+        } else {
           d.positions.forEach(p => {
             const action = {
               doAction: () => {
@@ -449,6 +474,10 @@ export class Replayer {
         if (!target) {
           return this.debugNodeNotFound(d, d.id);
         }
+        this.emitter.emit(ReplayerEvents.MouseInteraction, {
+          type: d.type,
+          target,
+        });
         switch (d.type) {
           case MouseInteractions.Blur:
             if (((target as Node) as HTMLElement).blur) {
@@ -463,6 +492,8 @@ export class Replayer {
             }
             break;
           case MouseInteractions.Click:
+          case MouseInteractions.TouchStart:
+          case MouseInteractions.TouchEnd:
             /**
              * Click has no visual impact when replaying and may
              * trigger navigation when apply to an <a> link.

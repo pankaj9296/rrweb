@@ -24,6 +24,8 @@ function record(options: recordOptions = {}): listenerHandler | undefined {
     checkoutEveryNth,
     blockClass = 'rr-block',
     ignoreClass = 'rr-ignore',
+    inlineStylesheet = true,
+    maskAllInputs = false,
   } = options;
   // runtime checks for user options
   if (!emit) {
@@ -62,7 +64,12 @@ function record(options: recordOptions = {}): listenerHandler | undefined {
       }),
       isCheckout,
     );
-    const [node, idNodeMap] = snapshot(document, blockClass);
+    const [node, idNodeMap] = snapshot(
+      document,
+      blockClass,
+      inlineStylesheet,
+      maskAllInputs,
+    );
     if (!node) {
       return console.warn('Failed to snapshot the document');
     }
@@ -160,6 +167,8 @@ function record(options: recordOptions = {}): listenerHandler | undefined {
             ),
           blockClass,
           ignoreClass,
+          maskAllInputs,
+          inlineStylesheet,
         }),
       );
     };

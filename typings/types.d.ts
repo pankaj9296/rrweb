@@ -77,6 +77,8 @@ export declare type recordOptions = {
     checkoutEveryNms?: number;
     blockClass?: blockClass;
     ignoreClass?: string;
+    maskAllInputs?: boolean;
+    inlineStylesheet?: boolean;
 };
 export declare type observerParam = {
     mutationCb: mutationCallBack;
@@ -87,6 +89,8 @@ export declare type observerParam = {
     inputCb: inputCallback;
     blockClass: blockClass;
     ignoreClass: string;
+    maskAllInputs: boolean;
+    inlineStylesheet: boolean;
 };
 export declare type textCursor = {
     node: Node;
@@ -190,6 +194,7 @@ export declare type playerConfig = {
     showWarning: boolean;
     showDebug: boolean;
     blockClass: string;
+    liveMode: boolean;
 };
 export declare type playerMetaData = {
     totalTime: number;
@@ -204,6 +209,11 @@ export declare type missingNodeMap = {
 export declare type actionWithDelay = {
     doAction: () => void;
     delay: number;
+};
+export declare type Handler = (event?: unknown) => void;
+export declare type Emitter = {
+    on(type: string, handler: Handler): void;
+    emit(type: string, event?: unknown): void;
 };
 export declare enum ReplayerEvents {
     Start = "start",

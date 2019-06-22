@@ -8,6 +8,7 @@ import {
   getWindowWidth,
   isBlocked,
   isAncestorRemoved,
+  isTouchEvent,
 } from '../utils';
 import {
   mutationCallBack,
@@ -28,7 +29,12 @@ import {
   attributeCursor,
   blockClass,
 } from '../types';
-import { deepDelete, isParentRemoved, isParentDropped } from './collection';
+import { deepDelete, isParentRemoved, isAncestorInSet } from './collection';
+
+const moveKey = (id: number, parentId: number) => `${id}@${parentId}`;
+function isINode(n: Node | INode): n is INode {
+  return '__sn' in n;
+}
 
 /**
  * Mutation observer will merge several mutations into an array and pass
@@ -50,24 +56,41 @@ import { deepDelete, isParentRemoved, isParentDropped } from './collection';
 function initMutationObserver(
   cb: mutationCallBack,
   blockClass: blockClass,
+  inlineStylesheet: boolean,
+  maskAllInputs: boolean,
 ): MutationObserver {
   const observer = new MutationObserver(mutations => {
     const texts: textCursor[] = [];
     const attributes: attributeCursor[] = [];
-    const removes: removedNodeMutation[] = [];
+    let removes: removedNodeMutation[] = [];
     const adds: addedNodeMutation[] = [];
 
-    const addsSet = new Set<Node>();
+    const addedSet = new Set<Node>();
+    const movedSet = new Set<Node>();
     const droppedSet = new Set<Node>();
 
-    const genAdds = (n: Node) => {
+    const movedMap: Record<string, true> = {};
+
+    const genAdds = (n: Node | INode, target?: Node | INode) => {
       if (isBlocked(n, blockClass)) {
         return;
       }
-      addsSet.add(n);
-      droppedSet.delete(n);
+      if (isINode(n)) {
+        movedSet.add(n);
+        let targetId: number | null = null;
+        if (target && isINode(target)) {
+          targetId = target.__sn.id;
+        }
+        if (targetId) {
+          movedMap[moveKey(n.__sn.id, targetId)] = true;
+        }
+      } else {
+        addedSet.add(n);
+        droppedSet.delete(n);
+      }
       n.childNodes.forEach(childN => genAdds(childN));
     };
+
     mutations.forEach(mutation => {
       const {
         type,
@@ -108,7 +131,7 @@ function initMutationObserver(
           break;
         }
         case 'childList': {
-          addedNodes.forEach(n => genAdds(n));
+          addedNodes.forEach(n => genAdds(n, target));
           removedNodes.forEach(n => {
             const nodeId = mirror.getId(n as INode);
             const parentId = mirror.getId(target as INode);
@@ -116,14 +139,15 @@ function initMutationObserver(
               return;
             }
             // removed node has not been serialized yet, just remove it from the Set
-            if (addsSet.has(n)) {
-              deepDelete(addsSet, n);
+            if (addedSet.has(n)) {
+              deepDelete(addedSet, n);
               droppedSet.add(n);
-            } else if (addsSet.has(target) && nodeId === -1) {
+            } else if (addedSet.has(target) && nodeId === -1) {
               /**
                * If target was newly added and removed child node was
                * not serialized, it means the child node has been removed
-               * before callback fired, so we can ignore it.
+               * before callback fired, so we can ignore it because
+               * newly added node will be serialized without child nodes.
                * TODO: verify this
                */
             } else if (isAncestorRemoved(target as INode)) {
@@ -133,6 +157,8 @@ function initMutationObserver(
                * the node is also removed which we do not need to track
                * and replay.
                */
+            } else if (movedSet.has(n) && movedMap[moveKey(nodeId, parentId)]) {
+              deepDelete(movedSet, n);
             } else {
               removes.push({
                 parentId,
@@ -148,22 +174,63 @@ function initMutationObserver(
       }
     });
 
-    Array.from(addsSet).forEach(n => {
-      if (!isParentDropped(droppedSet, n) && !isParentRemoved(removes, n)) {
-        adds.push({
-          parentId: mirror.getId((n.parentNode as Node) as INode),
-          previousId: !n.previousSibling
-            ? n.previousSibling
-            : mirror.getId(n.previousSibling as INode),
-          nextId: !n.nextSibling
-            ? n.nextSibling
-            : mirror.getId((n.nextSibling as unknown) as INode),
-          node: serializeNodeWithId(n, document, mirror.map, blockClass, true)!,
-        });
+    /**
+     * Sometimes child node may be pushed before its newly added
+     * parent, so we init a queue to store these nodes.
+     */
+    const addQueue: Node[] = [];
+    const pushAdd = (n: Node) => {
+      const parentId = mirror.getId((n.parentNode as Node) as INode);
+      if (parentId === -1) {
+        return addQueue.push(n);
+      }
+      adds.push({
+        parentId,
+        previousId: !n.previousSibling
+          ? n.previousSibling
+          : mirror.getId(n.previousSibling as INode),
+        nextId: !n.nextSibling
+          ? n.nextSibling
+          : mirror.getId((n.nextSibling as unknown) as INode),
+        node: serializeNodeWithId(
+          n,
+          document,
+          mirror.map,
+          blockClass,
+          true,
+          inlineStylesheet,
+          maskAllInputs,
+        )!,
+      });
+    };
+
+    Array.from(movedSet).forEach(pushAdd);
+
+    Array.from(addedSet).forEach(n => {
+      if (!isAncestorInSet(droppedSet, n) && !isParentRemoved(removes, n)) {
+        pushAdd(n);
+      } else if (isAncestorInSet(movedSet, n)) {
+        pushAdd(n);
       } else {
         droppedSet.add(n);
       }
     });
+
+    while (addQueue.length) {
+      if (
+        addQueue.every(
+          n => mirror.getId((n.parentNode as Node) as INode) === -1,
+        )
+      ) {
+        /**
+         * If all nodes in queue could not find a serialized parent,
+         * it may be a bug or corner case. We need to escape the
+         * dead while loop at once.
+         */
+        break;
+      }
+      pushAdd(addQueue.shift()!);
+    }
 
     const payload = {
       texts: texts
@@ -205,7 +272,7 @@ function initMutationObserver(
   return observer;
 }
 
-function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
+function initMoveObserver(cb: mousemoveCallBack): listenerHandler {
   let positions: mousePosition[] = [];
   let timeBaseline: number | null;
   const wrappedCb = throttle(() => {
@@ -219,9 +286,12 @@ function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
     positions = [];
     timeBaseline = null;
   }, 500);
-  const updatePosition = throttle<MouseEvent>(
+  const updatePosition = throttle<MouseEvent | TouchEvent>(
     evt => {
-      const { clientX, clientY, target } = evt;
+      const { target } = evt;
+      const { clientX, clientY } = isTouchEvent(evt)
+        ? evt.changedTouches[0]
+        : evt;
       if (!timeBaseline) {
         timeBaseline = Date.now();
       }
@@ -238,7 +308,13 @@ function initMousemoveObserver(cb: mousemoveCallBack): listenerHandler {
       trailing: false,
     },
   );
-  return on('mousemove', updatePosition);
+  const handlers = [
+    on('mousemove', updatePosition),
+    on('touchmove', updatePosition),
+  ];
+  return () => {
+    handlers.forEach(h => h());
+  };
 }
 
 function initMouseInteractionObserver(
@@ -247,12 +323,14 @@ function initMouseInteractionObserver(
 ): listenerHandler {
   const handlers: listenerHandler[] = [];
   const getHandler = (eventKey: keyof typeof MouseInteractions) => {
-    return (event: MouseEvent) => {
+    return (event: MouseEvent | TouchEvent) => {
       if (isBlocked(event.target as Node, blockClass)) {
         return;
       }
       const id = mirror.getId(event.target as INode);
-      const { clientX, clientY } = event;
+      const { clientX, clientY } = isTouchEvent(event)
+        ? event.changedTouches[0]
+        : event;
       cb({
         type: MouseInteractions[eventKey],
         id,
@@ -262,7 +340,7 @@ function initMouseInteractionObserver(
     };
   };
   Object.keys(MouseInteractions)
-    .filter(key => Number.isNaN(Number(key)))
+    .filter(key => Number.isNaN(Number(key)) && !key.endsWith('_Departed'))
     .forEach((eventKey: keyof typeof MouseInteractions) => {
       const eventName = eventKey.toLowerCase();
       const handler = getHandler(eventKey);
@@ -315,11 +393,27 @@ function initViewportResizeObserver(
 }
 
 const INPUT_TAGS = ['INPUT', 'TEXTAREA', 'SELECT'];
+const MASK_TYPES = [
+  'color',
+  'date',
+  'datetime-local',
+  'email',
+  'month',
+  'number',
+  'range',
+  'search',
+  'tel',
+  'text',
+  'time',
+  'url',
+  'week',
+];
 const lastInputValueMap: WeakMap<EventTarget, inputValue> = new WeakMap();
 function initInputObserver(
   cb: inputCallback,
   blockClass: blockClass,
   ignoreClass: string,
+  maskAllInputs: boolean,
 ): listenerHandler {
   function eventHandler(event: Event) {
     const { target } = event;
@@ -338,10 +432,14 @@ function initInputObserver(
     ) {
       return;
     }
-    const text = (target as HTMLInputElement).value;
+    let text = (target as HTMLInputElement).value;
     let isChecked = false;
+    const hasTextInput =
+      MASK_TYPES.includes(type) || (target as Element).tagName === 'TEXTAREA';
     if (type === 'radio' || type === 'checkbox') {
       isChecked = (target as HTMLInputElement).checked;
+    } else if (hasTextInput && maskAllInputs) {
+      text = '*'.repeat(text.length);
     }
     cbWithDedup(target, { text, isChecked });
     // if a radio was checked
@@ -407,8 +505,13 @@ function initInputObserver(
 }
 
 export default function initObservers(o: observerParam): listenerHandler {
-  const mutationObserver = initMutationObserver(o.mutationCb, o.blockClass);
-  const mousemoveHandler = initMousemoveObserver(o.mousemoveCb);
+  const mutationObserver = initMutationObserver(
+    o.mutationCb,
+    o.blockClass,
+    o.inlineStylesheet,
+    o.maskAllInputs,
+  );
+  const mousemoveHandler = initMoveObserver(o.mousemoveCb);
   const mouseInteractionHandler = initMouseInteractionObserver(
     o.mouseInteractionCb,
     o.blockClass,
@@ -419,6 +522,7 @@ export default function initObservers(o: observerParam): listenerHandler {
     o.inputCb,
     o.blockClass,
     o.ignoreClass,
+    o.maskAllInputs,
   );
   return () => {
     mutationObserver.disconnect();

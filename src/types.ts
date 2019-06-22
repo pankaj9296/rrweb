@@ -106,6 +106,8 @@ export type recordOptions = {
   checkoutEveryNms?: number;
   blockClass?: blockClass;
   ignoreClass?: string;
+  maskAllInputs?: boolean;
+  inlineStylesheet?: boolean;
 };
 
 export type observerParam = {
@@ -117,6 +119,8 @@ export type observerParam = {
   inputCb: inputCallback;
   blockClass: blockClass;
   ignoreClass: string;
+  maskAllInputs: boolean;
+  inlineStylesheet: boolean;
 };
 
 export type textCursor = {
@@ -180,7 +184,7 @@ export enum MouseInteractions {
   Focus,
   Blur,
   TouchStart,
-  TouchMove,
+  TouchMove_Departed, // we will start a separate observer for touch move event
   TouchEnd,
 }
 
@@ -239,6 +243,7 @@ export type playerConfig = {
   showWarning: boolean;
   showDebug: boolean;
   blockClass: string;
+  liveMode: boolean;
 };
 
 export type playerMetaData = {
@@ -256,6 +261,13 @@ export type missingNodeMap = {
 export type actionWithDelay = {
   doAction: () => void;
   delay: number;
+};
+
+export type Handler = (event?: unknown) => void;
+
+export type Emitter = {
+  on(type: string, handler: Handler): void;
+  emit(type: string, event?: unknown): void;
 };
 
 export enum ReplayerEvents {
